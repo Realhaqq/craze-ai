@@ -5,12 +5,14 @@ import { FiSend, FiRefreshCw } from 'react-icons/fi';
 export default function ChatInterface() {
   const [messages, setMessages] = useState([
     { 
-      text: "Wetin you want? Make you talk fast, I no get all day!", 
+      text: "Who you be? Tell me your name first before we start this thing!", 
       isUser: false 
     }
   ]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [userName, setUserName] = useState('');
+  const [isFirstMessage, setIsFirstMessage] = useState(true);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -24,6 +26,48 @@ export default function ChatInterface() {
     inputRef.current?.focus();
   }, []);
 
+  // Check if a message likely contains a user introducing themselves
+  const extractNameFromMessage = (message) => {
+    // Common patterns for name introduction
+    const patterns = [
+      /my name is (\w+)/i,
+      /i am (\w+)/i,
+      /i'm (\w+)/i,
+      /call me (\w+)/i,
+      /name's (\w+)/i,
+      /(\w+) is my name/i,
+    ];
+    
+    for (const pattern of patterns) {
+      const match = message.match(pattern);
+      if (match && match[1]) {
+        return match[1];
+      }
+    }
+    
+    // For first message, if no pattern matches, try to get the first word that might be a name
+    if (isFirstMessage) {
+      const words = message.split(/\s+/);
+      // Get first word that's not too short and has proper capitalization (likely a name)
+      const possibleName = words.find(word => 
+        word.length > 1 && 
+        word[0] === word[0].toUpperCase() && 
+        word.slice(1) === word.slice(1).toLowerCase()
+      );
+      
+      if (possibleName) {
+        return possibleName;
+      }
+      
+      // If no capitalized word, just use first word that's not too short
+      if (words[0] && words[0].length > 1) {
+        return words[0];
+      }
+    }
+    
+    return null;
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     
@@ -35,11 +79,31 @@ export default function ChatInterface() {
     setInput('');
     setLoading(true);
 
+    // For first message, prioritize extracting name
+    if (isFirstMessage) {
+      const extractedName = extractNameFromMessage(userMessage);
+      if (extractedName) {
+        setUserName(extractedName);
+      }
+      setIsFirstMessage(false);
+    } 
+    // For subsequent messages, still try to extract name if not known
+    else if (!userName) {
+      const extractedName = extractNameFromMessage(userMessage);
+      if (extractedName) {
+        setUserName(extractedName);
+      }
+    }
+
     try {
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: userMessage }),
+        body: JSON.stringify({ 
+          message: userMessage,
+          userName: userName || '',
+          isFirstMessage: isFirstMessage,
+        }),
       });
 
       if (!response.ok) {
@@ -50,6 +114,12 @@ export default function ChatInterface() {
       
       // Add AI response to chat
       setMessages(prev => [...prev, { text: data.reply, isUser: false }]);
+      
+      // If AI detected a name, update state
+      if (data.detectedName && !userName) {
+        setUserName(data.detectedName);
+      }
+      
     } catch (error) {
       console.error('Error:', error);
       setMessages(prev => [
@@ -68,10 +138,13 @@ export default function ChatInterface() {
   const clearChat = () => {
     setMessages([
       { 
-        text: "You don clear everything? Oya start again, I no get all day!", 
+        text: userName ? 
+          `${userName}, you don clear everything? Werey! Oya start again, I no get all day!` : 
+          "Who you be? Tell me your name first before we start this thing!", 
         isUser: false 
       }
     ]);
+    setIsFirstMessage(true);
   };
 
   return (
