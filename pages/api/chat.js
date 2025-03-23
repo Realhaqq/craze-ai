@@ -77,9 +77,8 @@ export default async function handler(req, res) {
         ],
         temperature: 0.8,
         max_tokens: 160,
-        timeout: 20000
       }, {
-        signal: controller.signal
+        signal: controller.signal // Keep the abort signal for timeout control
       });
   
       clearTimeout(timeoutId);
