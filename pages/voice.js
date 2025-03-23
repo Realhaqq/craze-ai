@@ -623,14 +623,25 @@ export default function VoiceInteraction() {
     }
   };
 
-  // Fix the handleRetry function - this was not properly clearing states
+  // Completely rewrite the handleRetry function to be more robust
   const handleRetry = () => {
-    if (lastTranscript) {
-      console.log(`Retrying with transcript (attempt ${retryCount + 1}):`, lastTranscript);
-      
-      // Clear all states first
-      setTimedOut(false);
-      setErrorMessage('');
+    console.log('Retry button clicked');
+    
+    if (!lastTranscript || !lastTranscript.trim()) {
+      console.log('Cannot retry: No transcript available');
+      setErrorMessage('Nothing to retry. Please try speaking again.');
+      return;
+    }
+    
+    // Force reset the timed out state FIRST
+    setTimedOut(false);
+    
+    // Clear error messages
+    setErrorMessage('');
+    
+    // Then set loading after a small delay to ensure UI updates
+    setTimeout(() => {
+      console.log('Setting loading state and preparing to retry...');
       setLoading(true);
       
       // Cancel any existing timeouts and requests
@@ -641,14 +652,15 @@ export default function VoiceInteraction() {
       
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
+        abortControllerRef.current = null;
       }
       
-      // Use setTimeout to ensure the state updates have propagated
+      // Then process the transcript with a delay
       setTimeout(() => {
-        // Start fresh processing
+        console.log('Now processing transcript:', lastTranscript);
         processTranscript(lastTranscript);
-      }, 100);
-    }
+      }, 200);
+    }, 100);
   };
 
   const toggleAudio = () => {
@@ -733,13 +745,22 @@ export default function VoiceInteraction() {
               {/* Controls with retry button when timed out */}
               <div className="flex flex-col items-center gap-6">
                 {timedOut ? (
+                  // Replace the retry button with a more reliable implementation
                   <button
-                    onClick={handleRetry}
-                    type="button" /* Explicitly make it a button type for better mobile compatibility */
-                    className="p-10 rounded-full bg-yellow-500 text-white hover:bg-yellow-600 active:bg-yellow-700 shadow-lg touch-manipulation border-4 border-yellow-400"
+                    onClick={(e) => {
+                      e.preventDefault(); // Prevent any default behavior
+                      e.stopPropagation(); // Stop event propagation
+                      console.log('Retry button clicked directly');
+                      handleRetry();
+                    }}
+                    type="button"
+                    className="p-10 rounded-full bg-yellow-500 text-white hover:bg-yellow-600 active:bg-yellow-700 shadow-lg 
+                      border-4 border-yellow-400 cursor-pointer select-none"
                     aria-label="Retry last request"
+                    style={{touchAction: 'manipulation'}} // Inline style as backup
                   >
                     <FiRefreshCw size={56} />
+                    <span className="sr-only">Retry</span> {/* Screen reader text */}
                   </button>
                 ) : (
                   <div className={`relative ${loading ? 'animate-pulse' : ''}`}>
@@ -764,6 +785,13 @@ export default function VoiceInteraction() {
                       <div className="absolute inset-0 rounded-full border-4 border-green-200 border-t-green-600 animate-spin"></div>
                     )}
                   </div>
+                )}
+                
+                {/* Add a text label for the retry button to make it more obvious */}
+                {timedOut && (
+                  <p className="text-sm font-medium text-gray-700">
+                    Tap to retry
+                  </p>
                 )}
                 
                 {/* Additional instruction text */}
