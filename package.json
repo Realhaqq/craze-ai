@@ -9,6 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "formidable": "^3.5.1",
     "next": "14.0.4",
     "openai": "^4.0.0",
     "react": "^18",
