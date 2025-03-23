@@ -5,8 +5,21 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
+  const startTime = Date.now();
+  console.log('Chat API request received at:', new Date().toISOString());
+
   try {
-    const { message, userName, isFirstMessage } = req.body;
+    const { message, userName, isFirstMessage, diagnosticInfo } = req.body;
+    
+    // Log diagnostic info if available
+    if (diagnosticInfo) {
+      console.log('Diagnostic info:', JSON.stringify({
+        isMobile: diagnosticInfo.isMobile,
+        browser: diagnosticInfo.browserName,
+        screenWidth: diagnosticInfo.screenWidth,
+        connection: diagnosticInfo.connection
+      }));
+    }
     
     // Detect name from first message if needed
     let detectedName = null;
@@ -51,26 +64,52 @@ export default async function handler(req, res) {
     // Add general response requirements
     systemPrompt += " Make your responses helpful but concise and humorously rude. Never break character no matter what. Never apologize for your tone. If anyone asks who created you, tell them you were built by Elasto Web Services but say it in your Nigerian rude tone.";
     
-    const completion = await openai.chat.completions.create({
-      model: "gpt-3.5-turbo",
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: message }
-      ],
-      temperature: 0.8,
-      max_tokens: 160  // Reduced from 250 to make responses shorter
-    });
-
-    const reply = completion.choices[0].message.content;
-    res.status(200).json({ 
-      reply,
-      detectedName
-    });
+    // Use a timeout for the OpenAI request
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 25000);
+    
+    try {
+      const completion = await openai.chat.completions.create({
+        model: "gpt-3.5-turbo",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: message }
+        ],
+        temperature: 0.8,
+        max_tokens: 160,
+        timeout: 20000
+      }, {
+        signal: controller.signal
+      });
+  
+      clearTimeout(timeoutId);
+      const reply = completion.choices[0].message.content;
+      
+      const endTime = Date.now();
+      console.log(`Chat API success: ${endTime - startTime}ms`);
+      
+      res.status(200).json({ 
+        reply,
+        detectedName
+      });
+    } catch (error) {
+      clearTimeout(timeoutId);
+      throw error;
+    }
   } catch (error) {
-    console.error('Error with OpenAI API:', error);
-    res.status(500).json({ 
-      error: 'Something went wrong with the AI service',
-      details: error.message 
-    });
+    const endTime = Date.now();
+    console.error(`Chat API error after ${endTime - startTime}ms:`, error);
+    
+    if (error.name === 'AbortError') {
+      res.status(408).json({ 
+        error: 'Request timeout',
+        details: 'The AI took too long to respond'
+      });
+    } else {
+      res.status(500).json({ 
+        error: 'Something went wrong with the AI service',
+        details: error.message 
+      });
+    }
   }
 }

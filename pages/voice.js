@@ -21,6 +21,12 @@ export default function VoiceInteraction() {
   const [timedOut, setTimedOut] = useState(false);
   const [lastTranscript, setLastTranscript] = useState('');
   const timeoutRef = useRef(null);
+  // Add these state variables
+  const [retryCount, setRetryCount] = useState(0);
+  const [networkStatus, setNetworkStatus] = useState('online');
+  const [diagnosticInfo, setDiagnosticInfo] = useState({});
+  const maxRetries = 3;
+  const abortControllerRef = useRef(null);
 
   const recognitionRef = useRef(null);
   const audioRef = useRef(null);
@@ -154,6 +160,55 @@ export default function VoiceInteraction() {
     }
   }, [loading]);
 
+  // Add network status detection
+  useEffect(() => {
+    const handleOnline = () => {
+      setNetworkStatus('online');
+      setErrorMessage(previousError => 
+        previousError.includes('network') ? '' : previousError
+      );
+    };
+    
+    const handleOffline = () => {
+      setNetworkStatus('offline');
+      setErrorMessage('Network connection lost. Please check your connection.');
+    };
+    
+    if (typeof window !== 'undefined') {
+      window.addEventListener('online', handleOnline);
+      window.addEventListener('offline', handleOffline);
+      
+      // Initial check
+      setNetworkStatus(navigator.onLine ? 'online' : 'offline');
+    }
+    
+    return () => {
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('online', handleOnline);
+        window.removeEventListener('offline', handleOffline);
+      }
+    };
+  }, []);
+
+  // Add device info collection
+  useEffect(() => {
+    if (typeof window !== 'undefined' && window.navigator) {
+      setDiagnosticInfo({
+        userAgent: navigator.userAgent,
+        platform: navigator.platform,
+        vendor: navigator.vendor,
+        isMobile: isMobileDevice(),
+        screenWidth: window.innerWidth,
+        browserName: getBrowserName(),
+        connection: navigator.connection ? {
+          downlink: navigator.connection.downlink,
+          effectiveType: navigator.connection.effectiveType,
+          rtt: navigator.connection.rtt
+        } : 'Unknown'
+      });
+    }
+  }, []);
+
   // Extract name from speech
   const extractNameFromMessage = (message) => {
     // Common patterns for name introduction
@@ -279,9 +334,36 @@ export default function VoiceInteraction() {
     }
   };
 
+  // Improved mobile detection with browser identification
+  const isMobileDevice = () => {
+    return (typeof navigator !== 'undefined') && 
+      (/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
+      (navigator.maxTouchPoints && navigator.maxTouchPoints > 2));
+  };
+
+  const getBrowserName = () => {
+    const userAgent = navigator.userAgent;
+    if (userAgent.match(/chrome|chromium|crios/i)) return "Chrome";
+    else if (userAgent.match(/firefox|fxios/i)) return "Firefox";
+    else if (userAgent.match(/safari/i)) return "Safari";
+    else if (userAgent.match(/opr\//i)) return "Opera";
+    else if (userAgent.match(/edg/i)) return "Edge";
+    else if (userAgent.match(/samsungbrowser/i)) return "Samsung Browser";
+    else return "Unknown";
+  };
+
   // Fix the processTranscript function to be more reliable on mobile
   const processTranscript = async (transcript) => {
-    // Clear any existing timeouts first
+    // Cancel any existing requests
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    
+    // Create a new abort controller
+    abortControllerRef.current = new AbortController();
+    const { signal } = abortControllerRef.current;
+    
+    // Clear any existing timeouts
     if (timeoutRef.current) {
       clearTimeout(timeoutRef.current);
     }
@@ -290,17 +372,28 @@ export default function VoiceInteraction() {
     setTimedOut(false);
     setLastTranscript(transcript);
     
-    console.log('Processing transcript:', transcript);
+    // Progressive timeout based on retry count (longer timeouts for retries)
+    const baseTimeout = isMobileDevice() ? 15000 : 20000;
+    const timeoutDuration = baseTimeout + (retryCount * 5000);
     
-    // Set a shorter timeout for mobile devices
-    const timeoutDuration = isMobileDevice() ? 15000 : 20000; // 15s for mobile, 20s for desktop
+    console.log(`Processing transcript (attempt ${retryCount + 1}/${maxRetries + 1}):`, transcript);
+    console.log(`Timeout set to ${timeoutDuration}ms`);
     
     timeoutRef.current = setTimeout(() => {
       console.log('Request timed out after', timeoutDuration, 'ms');
       if (loading) {
         setTimedOut(true);
         setLoading(false);
-        setErrorMessage('Request timed out. Tap the retry button to try again.');
+        setErrorMessage(`Request timed out. Tap the retry button to try again. (${retryCount + 1}/${maxRetries + 1})`);
+        
+        // Auto-retry if under max retries
+        if (retryCount < maxRetries) {
+          console.log(`Auto-retrying (${retryCount + 1}/${maxRetries})...`);
+          setRetryCount(prev => prev + 1);
+          setTimeout(() => {
+            handleRetry();
+          }, 1500); // Wait 1.5 seconds before auto-retry
+        }
       }
     }, timeoutDuration);
     
@@ -322,11 +415,13 @@ export default function VoiceInteraction() {
       }
       
       console.log('Sending request to chat API');
-      const controller = new AbortController();
-      const signal = controller.signal;
       
       // Create a separate timeout for the fetch operation
-      const fetchTimeoutId = setTimeout(() => controller.abort(), timeoutDuration - 1000);
+      const fetchTimeoutId = setTimeout(() => {
+        if (abortControllerRef.current) {
+          abortControllerRef.current.abort();
+        }
+      }, timeoutDuration - 1000);
       
       const chatResponse = await fetch('/api/chat', {
         method: 'POST',
@@ -335,6 +430,7 @@ export default function VoiceInteraction() {
           message: transcript,
           userName: userName || '',
           isFirstMessage: isFirstMessage,
+          diagnosticInfo: diagnosticInfo // Send diagnostic info to help with debugging
         }),
         signal
       });
@@ -350,12 +446,15 @@ export default function VoiceInteraction() {
       console.log('Received response from API');
       
       if (!chatResponse.ok) {
-        throw new Error(`Failed to get AI response: ${chatResponse.status}`);
+        throw new Error(`Server error: ${chatResponse.status}`);
       }
       
       const data = await chatResponse.json();
       console.log('Parsed JSON response');
       setAiResponse(data.reply);
+      
+      // Reset retry count on success
+      setRetryCount(0);
       
       // If name was detected in the API, update it
       if (data.detectedName && !userName) {
@@ -373,20 +472,26 @@ export default function VoiceInteraction() {
     } catch (error) {
       console.error('Error processing transcript:', error);
       
-      if (error.name === 'AbortError') {
-        setErrorMessage('Request took too long. Please try again.');
-        setTimedOut(true);
-      } else {
-        setErrorMessage(`Error: ${error.message}`);
-        setAiResponse("Ah! System don crash. Na your fault! Try again later, mumu!");
-      }
-      
-      setLoading(false);
-      
+      // Clear any timeouts
       if (timeoutRef.current) {
         clearTimeout(timeoutRef.current);
         timeoutRef.current = null;
       }
+      
+      // Handle different error types with user-friendly messages
+      if (error.name === 'AbortError') {
+        setErrorMessage('Request took too long. Please try again or check your connection.');
+        setTimedOut(true);
+      } else if (networkStatus === 'offline') {
+        setErrorMessage('You appear to be offline. Please check your internet connection.');
+      } else if (error.message.includes('fetch')) {
+        setErrorMessage('Network error. Please check your connection and try again.');
+      } else {
+        setErrorMessage(`Error: ${error.message}. Please try again.`);
+        setAiResponse("Ah! System don crash. Na your fault! Try again later, mumu!");
+      }
+      
+      setLoading(false);
     }
   };
 
@@ -411,30 +516,37 @@ export default function VoiceInteraction() {
       audioRef.current.currentTime = 0;
       
       console.log('Requesting text-to-speech');
-      // Get speech audio from OpenAI with a shorter timeout for mobile
+      
+      // Create a new abort controller for TTS request
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15000);
+      const ttsTimeoutId = setTimeout(() => controller.abort(), 12000); // Shorter timeout for TTS
       
       const response = await fetch('/api/text-to-speech', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, voice: 'onyx' }),
+        body: JSON.stringify({ 
+          text, 
+          voice: 'onyx',
+          retryAttempt: retryCount
+        }),
         signal: controller.signal
       });
       
-      clearTimeout(timeoutId);
+      clearTimeout(ttsTimeoutId);
       
       if (!response.ok) {
         throw new Error(`Failed to generate speech: ${response.status}`);
       }
       
       console.log('Received TTS response');
+      
       // Create blob from response
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
       setAudioUrl(url);
       
       console.log('Playing audio');
+      
       // Set up event handlers before playing
       audioRef.current.onplay = () => {
         console.log('Audio started playing');
@@ -451,22 +563,44 @@ export default function VoiceInteraction() {
         console.error('Audio error:', e);
         setIsSpeaking(false);
         setLoading(false);
+        // Show a message but don't prevent further interaction
+        setErrorMessage('Audio playback failed. Tap the microphone to continue.');
       };
       
-      // Play the audio
+      // Play the audio with user interaction handling for iOS
       audioRef.current.src = url;
       
       // On mobile, adding a slight delay before playing can help
-      setTimeout(() => {
-        audioRef.current.play()
+      const playPromise = audioRef.current.play();
+      
+      if (playPromise !== undefined) {
+        playPromise
           .then(() => console.log('Audio playback started successfully'))
           .catch(err => {
             console.error('Error playing audio:', err);
-            // If autoplay fails (common on mobile), show a message and end loading
-            setErrorMessage('Tap to enable audio playback');
+            
+            // Specific handling for iOS autoplay restrictions
+            if (err.name === 'NotAllowedError' && isMobileDevice()) {
+              setErrorMessage('Tap anywhere on the screen to enable audio playback');
+              
+              // Add a one-time event listener to play on user interaction
+              const playOnInteraction = () => {
+                audioRef.current.play()
+                  .then(() => {
+                    setErrorMessage('');
+                    document.removeEventListener('touchstart', playOnInteraction);
+                    document.removeEventListener('click', playOnInteraction);
+                  })
+                  .catch(e => console.error('Still failed to play:', e));
+              };
+              
+              document.addEventListener('touchstart', playOnInteraction, { once: true });
+              document.addEventListener('click', playOnInteraction, { once: true });
+            }
+            
             setLoading(false);
           });
-      }, 300);
+      }
       
       // Safety timeout - ensure loading state doesn't get stuck
       setTimeout(() => {
@@ -478,7 +612,13 @@ export default function VoiceInteraction() {
       
     } catch (error) {
       console.error('Error generating speech:', error);
-      setErrorMessage('Failed to generate speech');
+      
+      if (error.name === 'AbortError') {
+        setErrorMessage('Speech generation timed out. Please try again.');
+      } else {
+        setErrorMessage('Failed to generate speech. Please try again.');
+      }
+      
       setLoading(false);
     }
   };
@@ -486,17 +626,21 @@ export default function VoiceInteraction() {
   // Fix the handleRetry function - this was not properly clearing states
   const handleRetry = () => {
     if (lastTranscript) {
-      console.log('Retrying with transcript:', lastTranscript);
+      console.log(`Retrying with transcript (attempt ${retryCount + 1}):`, lastTranscript);
       
       // Clear all states first
       setTimedOut(false);
       setErrorMessage('');
       setLoading(true);
       
-      // Cancel any existing timeouts
+      // Cancel any existing timeouts and requests
       if (timeoutRef.current) {
         clearTimeout(timeoutRef.current);
         timeoutRef.current = null;
+      }
+      
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
       }
       
       // Use setTimeout to ensure the state updates have propagated
@@ -505,13 +649,6 @@ export default function VoiceInteraction() {
         processTranscript(lastTranscript);
       }, 100);
     }
-  };
-
-  // Improved detection for mobile devices
-  const isMobileDevice = () => {
-    return (typeof navigator !== 'undefined') && 
-      (/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
-      (navigator.maxTouchPoints && navigator.maxTouchPoints > 2));
   };
 
   const toggleAudio = () => {
@@ -550,26 +687,44 @@ export default function VoiceInteraction() {
 
         <main className="flex-1 container mx-auto max-w-3xl px-2 md:px-0 py-4 flex flex-col">
           <div className="flex-1 bg-white rounded-xl shadow-lg overflow-hidden mb-4 p-4 md:p-6 flex flex-col justify-center items-center">
-            {/* Error message */}
+            {/* Network status indicator */}
+            {networkStatus === 'offline' && (
+              <div className="mb-4 text-red-700 text-sm flex items-center gap-1 bg-red-50 p-3 rounded-lg w-full max-w-md">
+                <FiAlertCircle className="flex-shrink-0" />
+                <span>You are currently offline. Please check your internet connection.</span>
+              </div>
+            )}
+            
+            {/* Error message with retry indicator for specific errors */}
             {errorMessage && (
               <div className="mb-4 text-yellow-700 text-sm flex items-center gap-1 bg-yellow-50 p-3 rounded-lg w-full max-w-md">
                 <FiAlertCircle className="flex-shrink-0" />
                 <span>{errorMessage}</span>
+                {(errorMessage.includes('timed out') || errorMessage.includes('network')) && retryCount > 0 && (
+                  <span className="ml-1 text-xs bg-yellow-200 px-2 py-0.5 rounded-full">
+                    Retry {retryCount}/{maxRetries}
+                  </span>
+                )}
               </div>
             )}
             
             {/* Voice interaction area */}
             <div className="flex flex-col items-center justify-center gap-8 text-center">
-              {/* Status indicator with timeout handling */}
+              {/* Status indicator with more detailed feedback */}
               <div className="text-lg text-gray-700 font-medium max-w-sm">
                 {isListening ? (
                   <span>Listening... Tap again when done</span>
                 ) : isSpeaking ? (
                   <span>Speaking...</span>
                 ) : loading ? (
-                  <span>Processing...</span>
+                  <div className="flex flex-col items-center">
+                    <span>Processing{Array(1 + (retryCount % 3)).fill('.').join('')}</span>
+                    {retryCount > 0 && (
+                      <span className="text-xs text-gray-500 mt-1">Attempt {retryCount + 1}/{maxRetries + 1}</span>
+                    )}
+                  </div>
                 ) : timedOut ? (
-                  <span>Request took too long</span>
+                  <span>Request took too long. Please retry.</span>
                 ) : (
                   <span>Tap to start talking</span>
                 )}
@@ -581,7 +736,7 @@ export default function VoiceInteraction() {
                   <button
                     onClick={handleRetry}
                     type="button" /* Explicitly make it a button type for better mobile compatibility */
-                    className="p-10 rounded-full bg-yellow-500 text-white hover:bg-yellow-600 active:bg-yellow-700 shadow-lg touch-manipulation"
+                    className="p-10 rounded-full bg-yellow-500 text-white hover:bg-yellow-600 active:bg-yellow-700 shadow-lg touch-manipulation border-4 border-yellow-400"
                     aria-label="Retry last request"
                   >
                     <FiRefreshCw size={56} />
@@ -590,15 +745,15 @@ export default function VoiceInteraction() {
                   <div className={`relative ${loading ? 'animate-pulse' : ''}`}>
                     <button
                       onClick={toggleListening}
-                      disabled={loading || isSpeaking}
+                      disabled={loading || isSpeaking || !microphoneSupported || networkStatus === 'offline'}
                       type="button" /* Explicitly make it a button type for better mobile compatibility */
                       className={`p-10 rounded-full transition-colors ${
-                        !microphoneSupported
+                        !microphoneSupported || networkStatus === 'offline'
                           ? "bg-gray-300 text-gray-500 cursor-not-allowed"
                           : isListening
                             ? "bg-red-500 text-white scale-110 transform transition-transform"
                             : "bg-green-600 text-white hover:bg-green-700 active:bg-green-800"
-                      } ${(loading || isSpeaking) ? "opacity-70" : ""} shadow-lg touch-manipulation`}
+                      } ${(loading || isSpeaking) ? "opacity-70" : ""} shadow-lg touch-manipulation border-4 ${isListening ? 'border-red-400' : 'border-green-500'}`}
                       aria-label={isListening ? "Tap to stop" : "Tap to start talking"}
                     >
                       <FiMic size={56} />
@@ -611,7 +766,16 @@ export default function VoiceInteraction() {
                   </div>
                 )}
                 
-                {/* Audio toggle button remains commented out */}
+                {/* Additional instruction text */}
+                {(isMobileDevice() && !errorMessage) && (
+                  <p className="text-xs text-gray-500 mt-2 max-w-xs">
+                    {isListening ? 
+                      "Speak clearly and tap again when done" : 
+                      loading ? 
+                        "Processing your request..." : 
+                        "Tap the microphone and speak clearly"}
+                  </p>
+                )}
               </div>
             </div>
           </div>
