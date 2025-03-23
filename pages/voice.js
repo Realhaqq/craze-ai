@@ -132,6 +132,28 @@ export default function VoiceInteraction() {
     };
   }, []);
 
+  // Add a new useEffect to handle mobile-specific browser behaviors
+  useEffect(() => {
+    // Some mobile browsers (especially iOS) require special handling
+    const isMobile = /iPhone|iPad|iPod|Android/i.test(
+      typeof navigator !== 'undefined' ? navigator.userAgent : ''
+    );
+    
+    // For mobile browsers, we'll use a more aggressive timeout strategy
+    if (isMobile) {
+      // If we're in processing state for too long, force reset
+      const mobileProcessingTimeout = setTimeout(() => {
+        if (loading) {
+          console.log('Mobile timeout triggered - resetting state');
+          setLoading(false);
+          setTimedOut(true);
+        }
+      }, 15000); // 15 seconds timeout for mobile
+      
+      return () => clearTimeout(mobileProcessingTimeout);
+    }
+  }, [loading]);
+
   // Extract name from speech
   const extractNameFromMessage = (message) => {
     // Common patterns for name introduction
@@ -257,15 +279,18 @@ export default function VoiceInteraction() {
     }
   };
 
-  // Modify the processTranscript function to include timeout
+  // Fix the processTranscript function to be more reliable on mobile
   const processTranscript = async (transcript) => {
     setLoading(true);
     setTimedOut(false);
     setLastTranscript(transcript);
     
-    // Set a timeout for the request (20 seconds)
+    console.log('Processing transcript:', transcript);
+    
+    // Set a timeout for the request
     clearTimeout(timeoutRef.current);
     timeoutRef.current = setTimeout(() => {
+      console.log('Request timed out');
       if (loading) {
         setTimedOut(true);
         setLoading(false);
@@ -290,7 +315,7 @@ export default function VoiceInteraction() {
         }
       }
       
-      // Send the transcribed text to our chat API
+      console.log('Sending request to chat API');
       const chatResponse = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -303,23 +328,26 @@ export default function VoiceInteraction() {
       
       // Clear the timeout as we got a response
       clearTimeout(timeoutRef.current);
+      console.log('Received response from API');
       
       if (!chatResponse.ok) {
-        throw new Error('Failed to get AI response');
+        throw new Error(`Failed to get AI response: ${chatResponse.status}`);
       }
       
-      const { reply, detectedName } = await chatResponse.json();
-      setAiResponse(reply);
+      const data = await chatResponse.json();
+      console.log('Parsed JSON response');
+      setAiResponse(data.reply);
       
       // If name was detected in the API, update it
-      if (detectedName && !userName) {
-        setUserName(detectedName);
-        localStorage.setItem('crazeAI_userName', detectedName);
+      if (data.detectedName && !userName) {
+        setUserName(data.detectedName);
+        localStorage.setItem('crazeAI_userName', data.detectedName);
       }
       
       // If audio is enabled, generate speech
       if (audioEnabled) {
-        speakResponse(reply);
+        console.log('Generating speech for response');
+        return speakResponse(data.reply);
       } else {
         setLoading(false);
       }
@@ -332,20 +360,13 @@ export default function VoiceInteraction() {
     }
   };
 
-  // Add a retry function
-  const handleRetry = () => {
-    if (lastTranscript) {
-      setTimedOut(false);
-      setErrorMessage('');
-      processTranscript(lastTranscript);
-    }
-  };
-
+  // Update the speakResponse method to handle mobile issues better
   const speakResponse = async (text) => {
     try {
       // Check if audio is supported
       if (!audioRef.current) {
-        setLoading(false); // End loading if no audio support
+        console.log('Audio not supported');
+        setLoading(false);
         return;
       }
       
@@ -359,38 +380,93 @@ export default function VoiceInteraction() {
       audioRef.current.pause();
       audioRef.current.currentTime = 0;
       
-      // Get speech audio from OpenAI
+      console.log('Requesting text-to-speech');
+      // Get speech audio from OpenAI with a shorter timeout for mobile
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15000);
+      
       const response = await fetch('/api/text-to-speech', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, voice: 'onyx' }), // onyx is a deep male voice
+        body: JSON.stringify({ text, voice: 'onyx' }),
+        signal: controller.signal
       });
       
+      clearTimeout(timeoutId);
+      
       if (!response.ok) {
-        throw new Error('Failed to generate speech');
+        throw new Error(`Failed to generate speech: ${response.status}`);
       }
       
+      console.log('Received TTS response');
       // Create blob from response
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
       setAudioUrl(url);
       
+      console.log('Playing audio');
       // Set up event handlers before playing
       audioRef.current.onplay = () => {
+        console.log('Audio started playing');
         setIsSpeaking(true);
         setLoading(false); // End loading state when speech begins
       };
       
+      audioRef.current.onended = () => {
+        console.log('Audio finished playing');
+        setIsSpeaking(false);
+      };
+      
+      audioRef.current.onerror = (e) => {
+        console.error('Audio error:', e);
+        setIsSpeaking(false);
+        setLoading(false);
+      };
+      
       // Play the audio
       audioRef.current.src = url;
-      audioRef.current.play().catch(err => {
-        console.error('Error playing audio:', err);
-        setLoading(false); // End loading on playback error
-      });
+      
+      // On mobile, adding a slight delay before playing can help
+      setTimeout(() => {
+        audioRef.current.play()
+          .then(() => console.log('Audio playback started successfully'))
+          .catch(err => {
+            console.error('Error playing audio:', err);
+            // If autoplay fails (common on mobile), show a message and end loading
+            setErrorMessage('Tap to enable audio playback');
+            setLoading(false);
+          });
+      }, 300);
+      
+      // Safety timeout - ensure loading state doesn't get stuck
+      setTimeout(() => {
+        if (loading) {
+          console.log('Safety timeout triggered');
+          setLoading(false);
+        }
+      }, 5000);
+      
     } catch (error) {
       console.error('Error generating speech:', error);
       setErrorMessage('Failed to generate speech');
-      setLoading(false); // End loading on error
+      setLoading(false);
+    }
+  };
+
+  // Add a retry function
+  const handleRetry = () => {
+    if (lastTranscript) {
+      console.log('Retrying with transcript:', lastTranscript);
+      setTimedOut(false);
+      setErrorMessage('');
+      
+      // Reset state before retrying
+      setLoading(true);
+      
+      // Small delay before retrying to ensure clean state
+      setTimeout(() => {
+        processTranscript(lastTranscript);
+      }, 100);
     }
   };
 
