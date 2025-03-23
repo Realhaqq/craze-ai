@@ -162,12 +162,42 @@ export default function VoiceInteraction() {
     return null;
   };
 
-  // Start listening - now called on mousedown/touchstart
-  const startListening = () => {
+  // Add a new function to request microphone permission separately
+  const requestMicrophonePermission = async () => {
+    try {
+      // This will trigger the permission prompt without starting recording
+      await navigator.mediaDevices.getUserMedia({ audio: true });
+      setMicrophoneSupported(true);
+      setErrorMessage('');
+      return true;
+    } catch (error) {
+      console.error('Error requesting microphone permission:', error);
+      setErrorMessage('Microphone access denied. Please enable it in your browser settings.');
+      setMicrophoneSupported(false);
+      return false;
+    }
+  };
+
+  // Modify the startListening function to handle permissions properly
+  const startListening = async () => {
     setUserMessage('');
     setErrorMessage('');
     
     try {
+      // First check if we need to request permission
+      if (typeof navigator !== 'undefined' && navigator.permissions) {
+        const permissionStatus = await navigator.permissions.query({ name: 'microphone' });
+        
+        if (permissionStatus.state === 'prompt') {
+          // Request permission explicitly before starting recognition
+          const permissionGranted = await requestMicrophonePermission();
+          if (!permissionGranted) return;
+        } else if (permissionStatus.state === 'denied') {
+          setErrorMessage('Microphone access denied. Please enable it in your browser settings.');
+          return;
+        }
+      }
+
       if (recognitionRef.current) {
         recognitionRef.current.start();
         setIsListening(true);
@@ -180,6 +210,28 @@ export default function VoiceInteraction() {
     } catch (error) {
       console.error('Error starting speech recognition:', error);
       setErrorMessage('Failed to start speech recognition: ' + error.message);
+      
+      // If error is related to permission, try to explicitly request it
+      if (error.name === 'NotAllowedError') {
+        await requestMicrophonePermission();
+      }
+    }
+  };
+
+  // Replace the press-and-hold approach with a toggle button for better mobile compatibility
+  const toggleListening = async () => {
+    if (!microphoneSupported) {
+      const permissionGranted = await requestMicrophonePermission();
+      if (!permissionGranted) {
+        alert('Microphone access is required for voice chat. Please enable it in your browser settings.');
+        return;
+      }
+    }
+    
+    if (isListening) {
+      stopListening();
+    } else {
+      await startListening();
     }
   };
 
@@ -376,21 +428,16 @@ export default function VoiceInteraction() {
                 {/* Big microphone button - now using mousedown/up events */}
                 <div className={`relative ${loading ? 'animate-pulse' : ''}`}>
                   <button
-                    onMouseDown={startListening}
-                    onMouseUp={stopListening}
-                    onMouseLeave={stopListening}
-                    onTouchStart={startListening}
-                    onTouchEnd={stopListening}
-                    onTouchCancel={stopListening}
-                    disabled={loading || isSpeaking || !microphoneSupported}
+                    onClick={toggleListening}
+                    disabled={loading || isSpeaking}
                     className={`p-10 rounded-full transition-colors ${
                       !microphoneSupported
                         ? "bg-gray-300 text-gray-500 cursor-not-allowed"
                         : isListening
                           ? "bg-red-500 text-white scale-110 transform transition-transform"
-                          : "bg-green-600 text-white hover:bg-green-700"
+                          : "bg-green-600 text-white hover:bg-green-700 active:bg-green-800"
                     } ${(loading || isSpeaking) ? "opacity-70" : ""} shadow-lg`}
-                    title={isListening ? "Release to stop" : "Press and hold to talk"}
+                    title={isListening ? "Tap to stop" : "Tap to start talking"}
                   >
                     <FiMic size={56} />
                   </button>
