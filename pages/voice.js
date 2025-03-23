@@ -281,22 +281,28 @@ export default function VoiceInteraction() {
 
   // Fix the processTranscript function to be more reliable on mobile
   const processTranscript = async (transcript) => {
+    // Clear any existing timeouts first
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current);
+    }
+    
     setLoading(true);
     setTimedOut(false);
     setLastTranscript(transcript);
     
     console.log('Processing transcript:', transcript);
     
-    // Set a timeout for the request
-    clearTimeout(timeoutRef.current);
+    // Set a shorter timeout for mobile devices
+    const timeoutDuration = isMobileDevice() ? 15000 : 20000; // 15s for mobile, 20s for desktop
+    
     timeoutRef.current = setTimeout(() => {
-      console.log('Request timed out');
+      console.log('Request timed out after', timeoutDuration, 'ms');
       if (loading) {
         setTimedOut(true);
         setLoading(false);
-        setErrorMessage('Request timed out. Please try again.');
+        setErrorMessage('Request timed out. Tap the retry button to try again.');
       }
-    }, 20000); // 20 second timeout
+    }, timeoutDuration);
     
     try {
       // Process name detection same as before
@@ -316,6 +322,12 @@ export default function VoiceInteraction() {
       }
       
       console.log('Sending request to chat API');
+      const controller = new AbortController();
+      const signal = controller.signal;
+      
+      // Create a separate timeout for the fetch operation
+      const fetchTimeoutId = setTimeout(() => controller.abort(), timeoutDuration - 1000);
+      
       const chatResponse = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -324,10 +336,17 @@ export default function VoiceInteraction() {
           userName: userName || '',
           isFirstMessage: isFirstMessage,
         }),
+        signal
       });
       
+      clearTimeout(fetchTimeoutId);
+      
       // Clear the timeout as we got a response
-      clearTimeout(timeoutRef.current);
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+        timeoutRef.current = null;
+      }
+      
       console.log('Received response from API');
       
       if (!chatResponse.ok) {
@@ -347,16 +366,27 @@ export default function VoiceInteraction() {
       // If audio is enabled, generate speech
       if (audioEnabled) {
         console.log('Generating speech for response');
-        return speakResponse(data.reply);
+        await speakResponse(data.reply);
       } else {
         setLoading(false);
       }
     } catch (error) {
       console.error('Error processing transcript:', error);
-      setErrorMessage(`Error: ${error.message}`);
-      setAiResponse("Ah! System don crash. Na your fault! Try again later, mumu!");
+      
+      if (error.name === 'AbortError') {
+        setErrorMessage('Request took too long. Please try again.');
+        setTimedOut(true);
+      } else {
+        setErrorMessage(`Error: ${error.message}`);
+        setAiResponse("Ah! System don crash. Na your fault! Try again later, mumu!");
+      }
+      
       setLoading(false);
-      clearTimeout(timeoutRef.current);
+      
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+        timeoutRef.current = null;
+      }
     }
   };
 
@@ -453,21 +483,35 @@ export default function VoiceInteraction() {
     }
   };
 
-  // Add a retry function
+  // Fix the handleRetry function - this was not properly clearing states
   const handleRetry = () => {
     if (lastTranscript) {
       console.log('Retrying with transcript:', lastTranscript);
+      
+      // Clear all states first
       setTimedOut(false);
       setErrorMessage('');
-      
-      // Reset state before retrying
       setLoading(true);
       
-      // Small delay before retrying to ensure clean state
+      // Cancel any existing timeouts
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+        timeoutRef.current = null;
+      }
+      
+      // Use setTimeout to ensure the state updates have propagated
       setTimeout(() => {
+        // Start fresh processing
         processTranscript(lastTranscript);
       }, 100);
     }
+  };
+
+  // Improved detection for mobile devices
+  const isMobileDevice = () => {
+    return (typeof navigator !== 'undefined') && 
+      (/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
+      (navigator.maxTouchPoints && navigator.maxTouchPoints > 2));
   };
 
   const toggleAudio = () => {
@@ -508,7 +552,7 @@ export default function VoiceInteraction() {
           <div className="flex-1 bg-white rounded-xl shadow-lg overflow-hidden mb-4 p-4 md:p-6 flex flex-col justify-center items-center">
             {/* Error message */}
             {errorMessage && (
-              <div className="mb-4 text-yellow-700 text-sm flex items-center gap-1 bg-yellow-50 p-3 rounded">
+              <div className="mb-4 text-yellow-700 text-sm flex items-center gap-1 bg-yellow-50 p-3 rounded-lg w-full max-w-md">
                 <FiAlertCircle className="flex-shrink-0" />
                 <span>{errorMessage}</span>
               </div>
@@ -525,7 +569,7 @@ export default function VoiceInteraction() {
                 ) : loading ? (
                   <span>Processing...</span>
                 ) : timedOut ? (
-                  <span>Request took too long. Please try again.</span>
+                  <span>Request took too long</span>
                 ) : (
                   <span>Tap to start talking</span>
                 )}
@@ -536,8 +580,9 @@ export default function VoiceInteraction() {
                 {timedOut ? (
                   <button
                     onClick={handleRetry}
-                    className="p-10 rounded-full bg-yellow-500 text-white hover:bg-yellow-600 active:bg-yellow-700 shadow-lg"
-                    title="Retry last request"
+                    type="button" /* Explicitly make it a button type for better mobile compatibility */
+                    className="p-10 rounded-full bg-yellow-500 text-white hover:bg-yellow-600 active:bg-yellow-700 shadow-lg touch-manipulation"
+                    aria-label="Retry last request"
                   >
                     <FiRefreshCw size={56} />
                   </button>
@@ -546,14 +591,15 @@ export default function VoiceInteraction() {
                     <button
                       onClick={toggleListening}
                       disabled={loading || isSpeaking}
+                      type="button" /* Explicitly make it a button type for better mobile compatibility */
                       className={`p-10 rounded-full transition-colors ${
                         !microphoneSupported
                           ? "bg-gray-300 text-gray-500 cursor-not-allowed"
                           : isListening
                             ? "bg-red-500 text-white scale-110 transform transition-transform"
                             : "bg-green-600 text-white hover:bg-green-700 active:bg-green-800"
-                      } ${(loading || isSpeaking) ? "opacity-70" : ""} shadow-lg`}
-                      title={isListening ? "Tap to stop" : "Tap to start talking"}
+                      } ${(loading || isSpeaking) ? "opacity-70" : ""} shadow-lg touch-manipulation`}
+                      aria-label={isListening ? "Tap to stop" : "Tap to start talking"}
                     >
                       <FiMic size={56} />
                     </button>
