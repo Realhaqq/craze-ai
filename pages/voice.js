@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import Head from 'next/head';
 import Link from 'next/link';
-import { FiArrowLeft, FiMic, FiVolume2, FiVolumeX, FiAlertCircle } from 'react-icons/fi';
+import { FiArrowLeft, FiMic, FiRefreshCw, FiAlertCircle } from 'react-icons/fi';
 // Comment out AudioWaveform as requested
 // import AudioWaveform from '../components/AudioWaveform';
 
@@ -17,6 +17,10 @@ export default function VoiceInteraction() {
   const [userName, setUserName] = useState('');
   const [isFirstMessage, setIsFirstMessage] = useState(true);
   const [audioUrl, setAudioUrl] = useState(null);
+  // Add new states for timeout handling
+  const [timedOut, setTimedOut] = useState(false);
+  const [lastTranscript, setLastTranscript] = useState('');
+  const timeoutRef = useRef(null);
 
   const recognitionRef = useRef(null);
   const audioRef = useRef(null);
@@ -119,6 +123,11 @@ export default function VoiceInteraction() {
       
       if (audioUrl) {
         URL.revokeObjectURL(audioUrl);
+      }
+      
+      // Clear any pending timeouts
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
       }
     };
   }, []);
@@ -248,8 +257,21 @@ export default function VoiceInteraction() {
     }
   };
 
+  // Modify the processTranscript function to include timeout
   const processTranscript = async (transcript) => {
     setLoading(true);
+    setTimedOut(false);
+    setLastTranscript(transcript);
+    
+    // Set a timeout for the request (20 seconds)
+    clearTimeout(timeoutRef.current);
+    timeoutRef.current = setTimeout(() => {
+      if (loading) {
+        setTimedOut(true);
+        setLoading(false);
+        setErrorMessage('Request timed out. Please try again.');
+      }
+    }, 20000); // 20 second timeout
     
     try {
       // Process name detection same as before
@@ -268,7 +290,7 @@ export default function VoiceInteraction() {
         }
       }
       
-      // Send the transcribed text to our chat API (no change here)
+      // Send the transcribed text to our chat API
       const chatResponse = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -278,6 +300,9 @@ export default function VoiceInteraction() {
           isFirstMessage: isFirstMessage,
         }),
       });
+      
+      // Clear the timeout as we got a response
+      clearTimeout(timeoutRef.current);
       
       if (!chatResponse.ok) {
         throw new Error('Failed to get AI response');
@@ -294,23 +319,28 @@ export default function VoiceInteraction() {
       
       // If audio is enabled, generate speech
       if (audioEnabled) {
-        // Notice we don't set loading to false here, we'll do it when speech starts
         speakResponse(reply);
       } else {
-        // If audio is disabled, we can end the loading state immediately
         setLoading(false);
       }
     } catch (error) {
       console.error('Error processing transcript:', error);
       setErrorMessage(`Error: ${error.message}`);
       setAiResponse("Ah! System don crash. Na your fault! Try again later, mumu!");
-      // On error, we should end the loading state
       setLoading(false);
+      clearTimeout(timeoutRef.current);
     }
-    // Removed the 'finally' block that was setting loading to false
   };
 
-  // Update the speakResponse method to manage loading state
+  // Add a retry function
+  const handleRetry = () => {
+    if (lastTranscript) {
+      setTimedOut(false);
+      setErrorMessage('');
+      processTranscript(lastTranscript);
+    }
+  };
+
   const speakResponse = async (text) => {
     try {
       // Check if audio is supported
@@ -408,60 +438,58 @@ export default function VoiceInteraction() {
               </div>
             )}
             
-            {/* Voice interaction area - simplified to just show status */}
+            {/* Voice interaction area */}
             <div className="flex flex-col items-center justify-center gap-8 text-center">
-              {/* Status indicator - simplified to remove redundant processing info */}
+              {/* Status indicator with timeout handling */}
               <div className="text-lg text-gray-700 font-medium max-w-sm">
                 {isListening ? (
-                  <span>Listening... Release when done</span>
+                  <span>Listening... Tap again when done</span>
                 ) : isSpeaking ? (
                   <span>Speaking...</span>
                 ) : loading ? (
                   <span>Processing...</span>
+                ) : timedOut ? (
+                  <span>Request took too long. Please try again.</span>
                 ) : (
-                  <span>Press and hold to talk</span>
+                  <span>Tap to start talking</span>
                 )}
               </div>
               
-              {/* Controls with bigger mic button and press/hold events */}
+              {/* Controls with retry button when timed out */}
               <div className="flex flex-col items-center gap-6">
-                {/* Big microphone button - now using mousedown/up events */}
-                <div className={`relative ${loading ? 'animate-pulse' : ''}`}>
+                {timedOut ? (
                   <button
-                    onClick={toggleListening}
-                    disabled={loading || isSpeaking}
-                    className={`p-10 rounded-full transition-colors ${
-                      !microphoneSupported
-                        ? "bg-gray-300 text-gray-500 cursor-not-allowed"
-                        : isListening
-                          ? "bg-red-500 text-white scale-110 transform transition-transform"
-                          : "bg-green-600 text-white hover:bg-green-700 active:bg-green-800"
-                    } ${(loading || isSpeaking) ? "opacity-70" : ""} shadow-lg`}
-                    title={isListening ? "Tap to stop" : "Tap to start talking"}
+                    onClick={handleRetry}
+                    className="p-10 rounded-full bg-yellow-500 text-white hover:bg-yellow-600 active:bg-yellow-700 shadow-lg"
+                    title="Retry last request"
                   >
-                    <FiMic size={56} />
+                    <FiRefreshCw size={56} />
                   </button>
-                  
-                  {/* Loading spinner around mic button */}
-                  {loading && (
-                    <div className="absolute inset-0 rounded-full border-4 border-green-200 border-t-green-600 animate-spin"></div>
-                  )}
-                </div>
+                ) : (
+                  <div className={`relative ${loading ? 'animate-pulse' : ''}`}>
+                    <button
+                      onClick={toggleListening}
+                      disabled={loading || isSpeaking}
+                      className={`p-10 rounded-full transition-colors ${
+                        !microphoneSupported
+                          ? "bg-gray-300 text-gray-500 cursor-not-allowed"
+                          : isListening
+                            ? "bg-red-500 text-white scale-110 transform transition-transform"
+                            : "bg-green-600 text-white hover:bg-green-700 active:bg-green-800"
+                      } ${(loading || isSpeaking) ? "opacity-70" : ""} shadow-lg`}
+                      title={isListening ? "Tap to stop" : "Tap to start talking"}
+                    >
+                      <FiMic size={56} />
+                    </button>
+                    
+                    {/* Loading spinner around mic button */}
+                    {loading && (
+                      <div className="absolute inset-0 rounded-full border-4 border-green-200 border-t-green-600 animate-spin"></div>
+                    )}
+                  </div>
+                )}
                 
-                {/* Audio toggle button - Commented out as requested but kept in code */}
-                {/* 
-                <button
-                  onClick={toggleAudio}
-                  className={`p-4 rounded-full transition-colors ${
-                    audioEnabled 
-                      ? "bg-green-100 text-green-700 hover:bg-green-200" 
-                      : "bg-gray-200 text-gray-500 hover:bg-gray-300"
-                  }`}
-                  title={audioEnabled ? "Mute audio" : "Enable audio"}
-                >
-                  {audioEnabled ? <FiVolume2 size={28} /> : <FiVolumeX size={28} />}
-                </button>
-                */}
+                {/* Audio toggle button remains commented out */}
               </div>
             </div>
           </div>
