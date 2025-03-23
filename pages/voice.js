@@ -251,14 +251,56 @@ export default function VoiceInteraction() {
   // Add a new function to request microphone permission separately
   const requestMicrophonePermission = async () => {
     try {
-      // This will trigger the permission prompt without starting recording
-      await navigator.mediaDevices.getUserMedia({ audio: true });
-      setMicrophoneSupported(true);
-      setErrorMessage('');
-      return true;
+      // On iOS Safari, getUserMedia sometimes doesn't work right after permission is granted
+      // We'll use a more reliable approach with multiple attempts
+      let attempts = 0;
+      const maxAttempts = 3;
+      
+      while (attempts < maxAttempts) {
+        try {
+          console.log(`Requesting microphone permission (attempt ${attempts + 1}/${maxAttempts})`);
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          
+          // Store the stream to avoid garbage collection issues on iOS
+          window.tempAudioStream = stream;
+          
+          // Success - set up the microphone state
+          setMicrophoneSupported(true);
+          setErrorMessage('');
+          
+          // Clean up the stream after a short delay to ensure permission is registered
+          setTimeout(() => {
+            if (window.tempAudioStream) {
+              window.tempAudioStream.getTracks().forEach(track => track.stop());
+              window.tempAudioStream = null;
+            }
+          }, 500);
+          
+          return true;
+        } catch (attemptError) {
+          console.warn(`Attempt ${attempts + 1} failed:`, attemptError);
+          attempts++;
+          // Wait briefly before retry
+          await new Promise(resolve => setTimeout(resolve, 300));
+        }
+      }
+      
+      // If we get here, all attempts failed
+      throw new Error('Multiple microphone access attempts failed');
     } catch (error) {
       console.error('Error requesting microphone permission:', error);
-      setErrorMessage('Microphone access denied. Please enable it in your browser settings.');
+      
+      // More specific error messages based on the error
+      if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
+        setErrorMessage('Microphone access denied. Please enable it in your browser settings and reload the page.');
+      } else if (error.name === 'NotFoundError') {
+        setErrorMessage('No microphone found. Please connect a microphone and try again.');
+      } else if (error.name === 'NotReadableError' || error.name === 'AbortError') {
+        setErrorMessage('Your microphone is busy or unavailable. Please close other apps that might be using it.');
+      } else {
+        setErrorMessage('Could not access microphone. Please check your device settings.');
+      }
+      
       setMicrophoneSupported(false);
       return false;
     }
@@ -306,18 +348,32 @@ export default function VoiceInteraction() {
 
   // Replace the press-and-hold approach with a toggle button for better mobile compatibility
   const toggleListening = async () => {
+    // Don't let user start listening if already processing
+    if (loading) return; 
+    
+    // First make sure we have microphone access
     if (!microphoneSupported) {
+      console.log('Requesting microphone permission before listening');
       const permissionGranted = await requestMicrophonePermission();
       if (!permissionGranted) {
-        alert('Microphone access is required for voice chat. Please enable it in your browser settings.');
         return;
       }
     }
     
+    // If already listening, stop
     if (isListening) {
+      console.log('Stopping listening');
       stopListening();
     } else {
-      await startListening();
+      // Otherwise, start listening with a slight delay to ensure UI updates
+      console.log('Starting listening');
+      setTimedOut(false); // Reset timeout status if retrying
+      
+      // Add a small delay before starting to allow UI to update
+      // This prevents issues on some mobile browsers
+      setTimeout(async () => {
+        await startListening();
+      }, 100);
     }
   };
 
@@ -334,14 +390,32 @@ export default function VoiceInteraction() {
     }
   };
 
-  // Improved mobile detection with browser identification
+  // Fixed isMobileDevice to work with server-side rendering
   const isMobileDevice = () => {
-    return (typeof navigator !== 'undefined') && 
-      (/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
-      (navigator.maxTouchPoints && navigator.maxTouchPoints > 2));
+    // Check if we're in a browser environment first
+    if (typeof window === 'undefined') return false;
+    
+    // Now safely check for touch support
+    const hasTouch = Boolean(
+      'ontouchstart' in window || 
+      (window.navigator && window.navigator.maxTouchPoints > 0) ||
+      (window.navigator && window.navigator.msMaxTouchPoints > 0)
+    );
+    
+    // Check user agent if touch is supported
+    if (hasTouch && typeof navigator !== 'undefined') {
+      return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile|mobile|CriOS/i.test(
+        navigator.userAgent
+      );
+    }
+    
+    return false;
   };
 
   const getBrowserName = () => {
+    // Add SSR safety check
+    if (typeof window === 'undefined' || !window.navigator) return "Unknown";
+    
     const userAgent = navigator.userAgent;
     if (userAgent.match(/chrome|chromium|crios/i)) return "Chrome";
     else if (userAgent.match(/firefox|fxios/i)) return "Firefox";
@@ -672,27 +746,42 @@ export default function VoiceInteraction() {
     setAudioEnabled(!audioEnabled);
   };
 
+  // Update the header section to avoid SSR issues with isMobileDevice
   return (
     <>
       <Head>
         <title>Voice Chat with CrazeAI</title>
         <meta name="description" content="Talk with CrazeAI - the rudest Nigerian AI assistant" />
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0" />
+        {/* Add mobile specific meta tags */}
+        <meta name="mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-capable" content="yes" />
       </Head>
 
       <div className="flex flex-col h-screen bg-gradient-to-br from-green-50 to-gray-100">
         <header className="bg-gradient-to-r from-green-700 to-green-600 text-white p-3 md:p-4 shadow-md">
           <div className="container mx-auto px-2">
-            <div className="flex items-center">
-              <Link href="/" className="text-white hover:bg-white hover:bg-opacity-20 p-2 rounded-full mr-2">
-                <FiArrowLeft size={24} />
-              </Link>
-              <div>
-                <h1 className="text-xl md:text-3xl font-bold flex items-center">
-                  Voice CrazeAI <span className="ml-2 text-xl md:text-2xl">🇳🇬</span>
-                </h1>
-                <p className="text-xs md:text-base opacity-80">Press and hold to talk!</p>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center">
+                <Link href="/" className="text-white hover:bg-white hover:bg-opacity-20 p-2 rounded-full mr-2">
+                  <FiArrowLeft size={24} />
+                </Link>
+                <div>
+                  <h1 className="text-xl md:text-3xl font-bold flex items-center">
+                    Voice CrazeAI <span className="ml-2 text-xl md:text-2xl">🇳🇬</span>
+                  </h1>
+                  <p className="text-xs md:text-base opacity-80">
+                    Tap microphone to talk
+                  </p>
+                </div>
               </div>
+              
+              {/* Add device indicator for debugging - now SSR safe */}
+              {process.env.NODE_ENV === 'development' && typeof window !== 'undefined' && (
+                <span className="text-xs bg-white bg-opacity-20 px-2 py-1 rounded-full">
+                  {isMobileDevice() ? "Mobile Device" : "Desktop"}
+                </span>
+              )}
             </div>
           </div>
         </header>
@@ -795,7 +884,7 @@ export default function VoiceInteraction() {
                 )}
                 
                 {/* Additional instruction text */}
-                {(isMobileDevice() && !errorMessage) && (
+                {typeof window !== 'undefined' && isMobileDevice() && !errorMessage && (
                   <p className="text-xs text-gray-500 mt-2 max-w-xs">
                     {isListening ? 
                       "Speak clearly and tap again when done" : 
